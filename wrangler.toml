@@ -4,7 +4,6 @@ compatibility_date = "2026-07-18"
 
 [build]
   command = "npm run build:worker"
-  upload = { format = "service-worker" }
 
 [[d1_databases]]
 binding = "ROS_KNOWLEDGE_DB"
