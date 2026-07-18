@@ -1,0 +1,13 @@
+name = "relationship-os"
+main = "dist/worker.js"
+compatibility_date = "2026-07-18"
+account_id = ""
+
+[build]
+  command = "npm run build"
+  upload = { format = "service-worker" }
+
+[d1_databases]
+  bindings = [
+    { name = "ROS_KNOWLEDGE_DB", database_name = "relationship_os" }
+  ]

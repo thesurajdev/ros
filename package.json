@@ -1,0 +1,28 @@
+{
+  "name": "relationship-os",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "dev:worker": "npx wrangler dev",
+    "build": "tsc -p tsconfig.json",
+    "build:worker": "tsc -p tsconfig.worker.json",
+    "deploy:worker": "npx wrangler deploy",
+    "test": "vitest run",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "cloudflare": "^4.0.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.2026.0",
+    "typescript": "^5.8.3",
+    "vitest": "^2.1.8",
+    "wrangler": "^3.0.0",
+    "@types/node": "^22.10.1",
+    "tsx": "^4.20.0"
+  }
+}
