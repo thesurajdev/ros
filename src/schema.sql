@@ -41,3 +41,8 @@ CREATE TABLE IF NOT EXISTS attachments (
   metadata TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_entities_type_name ON entities(type, name);
+CREATE INDEX IF NOT EXISTS idx_events_entity_created ON events(entity_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_relationships_from_to ON relationships(from_entity, to_entity);
+CREATE INDEX IF NOT EXISTS idx_relationships_type ON relationships(relationship_type);

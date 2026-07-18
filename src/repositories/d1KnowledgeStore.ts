@@ -6,6 +6,8 @@ export class D1KnowledgeStore implements KnowledgeStore {
   constructor(private readonly db: D1Database) {}
 
   async load() {
+    await this.ensureSchema();
+
     const entitiesResult = await this.db.prepare('SELECT * FROM entities').all();
     const eventsResult = await this.db.prepare('SELECT * FROM events').all();
     const relationshipsResult = await this.db.prepare('SELECT * FROM relationships').all();
@@ -53,5 +55,45 @@ export class D1KnowledgeStore implements KnowledgeStore {
         .bind(relationship.id, relationship.from_entity, relationship.to_entity, relationship.relationship_type, JSON.stringify(relationship.metadata), relationship.created_at)
         .run();
     }
+  }
+
+  private async ensureSchema() {
+    await this.db.batch([
+      this.db.prepare(`
+        CREATE TABLE IF NOT EXISTS entities (
+          id TEXT PRIMARY KEY,
+          type TEXT NOT NULL,
+          name TEXT NOT NULL,
+          state TEXT NOT NULL DEFAULT '{}',
+          summary TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'active',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+      `),
+      this.db.prepare(`
+        CREATE TABLE IF NOT EXISTS events (
+          id TEXT PRIMARY KEY,
+          entity_id TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          payload TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL
+        )
+      `),
+      this.db.prepare(`
+        CREATE TABLE IF NOT EXISTS relationships (
+          id TEXT PRIMARY KEY,
+          from_entity TEXT NOT NULL,
+          to_entity TEXT NOT NULL,
+          relationship_type TEXT NOT NULL,
+          metadata TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL
+        )
+      `),
+      this.db.prepare('CREATE INDEX IF NOT EXISTS idx_entities_type_name ON entities(type, name)'),
+      this.db.prepare('CREATE INDEX IF NOT EXISTS idx_events_entity_created ON events(entity_id, created_at)'),
+      this.db.prepare('CREATE INDEX IF NOT EXISTS idx_relationships_from_to ON relationships(from_entity, to_entity)'),
+      this.db.prepare('CREATE INDEX IF NOT EXISTS idx_relationships_type ON relationships(relationship_type)')
+    ]);
   }
 }

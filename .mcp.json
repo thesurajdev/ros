@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "relationship-os": {
+      "type": "stdio",
+      "command": "npm",
+      "args": ["run", "dev"]
+    }
+  }
+}

@@ -1,16 +1,35 @@
+import { AmbiguousEntityError, DuplicateEntityError, EntityNotFoundError, RelationshipNotFoundError, ValidationFailedError } from '../lib/errors.js';
 import type { EntityRecord, EventRecord, RelationshipRecord, StructuredIntent } from '../types/index.js';
-import { AppError, AmbiguousEntityError, DuplicateEntityError, EntityNotFoundError, RelationshipNotFoundError, ValidationFailedError } from '../lib/errors.js';
-import { createId } from '../lib/uuid.js';
-import { entitySchema, eventSchema, relationshipSchema } from '../lib/schema.js';
 import type { KnowledgeStore } from '../repositories/knowledgeStore.js';
+import { EntityService } from './entityService.js';
+import { EventService } from './eventService.js';
+import { RelationshipService } from './relationshipService.js';
+import { ValidationService } from './validationService.js';
+import { SearchService } from './searchService.js';
+import { TimelineService } from './timelineService.js';
+import { ReportService } from './reportService.js';
 
 export class KnowledgeEngine {
   private readonly entities: EntityRecord[] = [];
   private readonly events: EventRecord[] = [];
   private readonly relationships: RelationshipRecord[] = [];
   private readonly initialized: Promise<void>;
+  private readonly entityService: EntityService;
+  private readonly eventService: EventService;
+  private readonly relationshipService: RelationshipService;
+  private readonly validationService: ValidationService;
+  private readonly searchService: SearchService;
+  private readonly timelineService: TimelineService;
+  private readonly reportService: ReportService;
 
   constructor(private readonly store?: KnowledgeStore) {
+    this.entityService = new EntityService(this.entities);
+    this.eventService = new EventService(this.events);
+    this.relationshipService = new RelationshipService(this.relationships, this.entityService);
+    this.validationService = new ValidationService(this.entityService);
+    this.searchService = new SearchService(this.entities);
+    this.timelineService = new TimelineService(this.events);
+    this.reportService = new ReportService(this.entities, this.events, this.relationships);
     this.initialized = this.initialize();
   }
 
@@ -28,42 +47,14 @@ export class KnowledgeEngine {
   async remember(intent: StructuredIntent): Promise<{ entity: EntityRecord; event: EventRecord }> {
     await this.ensureReady();
 
-    const validated = entitySchema.parse({
-      type: intent.entity?.type,
-      name: intent.entity?.name ?? intent.intent,
-      state: intent.payload ?? {},
-      summary: this.buildSummary(intent),
-      status: 'active'
-    });
+    this.validationService.validateIntent(intent);
+    this.validationService.validateEntityCreate(intent);
+    this.validationService.ensureNoDuplicateEntity(intent);
 
-    const existing = this.entities.find((entity) => entity.type === validated.type && entity.name === validated.name);
-    if (existing) {
-      throw new DuplicateEntityError(`Entity already exists`, { type: validated.type, name: validated.name });
-    }
+    const entity = this.entityService.createFromIntent(intent);
+    const event = this.eventService.append(entity.id, 'entity_created', { intent });
 
-    const entity: EntityRecord = {
-      id: createId('entity'),
-      type: validated.type,
-      name: validated.name,
-      state: validated.state as Record<string, unknown>,
-      summary: validated.summary,
-      status: validated.status,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    };
-
-    const event: EventRecord = {
-      id: createId('event'),
-      entity_id: entity.id,
-      event_type: 'entity_created',
-      payload: { intent },
-      created_at: new Date().toISOString()
-    };
-
-    this.entities.push(entity);
-    this.events.push(event);
     await this.persist();
-
     return { entity, event };
   }
 
@@ -80,28 +71,24 @@ export class KnowledgeEngine {
   async timeline(entityId: string): Promise<EventRecord[]> {
     await this.ensureReady();
 
-    const entity = this.entities.find((entry) => entry.id === entityId);
+    const entity = this.entityService.findById(entityId);
     if (!entity) {
       throw new EntityNotFoundError('Entity not found', { entityId });
     }
 
-    return this.events.filter((event) => event.entity_id === entityId).sort((a, b) => a.created_at.localeCompare(b.created_at));
+    return this.timelineService.timeline(entityId);
   }
 
   async search(query: string): Promise<EntityRecord[]> {
     await this.ensureReady();
-
-    const needle = query.toLowerCase();
-    return this.entities.filter((entity) => {
-      return [entity.name, entity.type, entity.summary].some((value) => String(value).toLowerCase().includes(needle));
-    });
+    return this.searchService.search(query);
   }
 
   async report(type: string): Promise<unknown> {
     await this.ensureReady();
 
     if (type === 'activity') {
-      return { totalEntities: this.entities.length, totalEvents: this.events.length, totalRelationships: this.relationships.length };
+      return this.reportService.activity();
     }
 
     return { type, summary: 'Report generated from the current in-memory dataset.' };
@@ -110,39 +97,96 @@ export class KnowledgeEngine {
   async link(from: string, to: string, relationshipType: string): Promise<RelationshipRecord> {
     await this.ensureReady();
 
-    const existing = this.relationships.find((relationship) => relationship.from_entity === from && relationship.to_entity === to && relationship.relationship_type === relationshipType);
-    if (existing) {
-      throw new DuplicateEntityError('Relationship already exists', { from, to, relationshipType });
+    this.validationService.validateRelationshipTargets(from, to, relationshipType);
+
+    let relationship: RelationshipRecord;
+    try {
+      relationship = this.relationshipService.create(from, to, relationshipType);
+      this.eventService.append(from, 'relationship_created', { relationshipType, to });
+      await this.persist();
+      return relationship;
+    } catch (error) {
+      if (error instanceof DuplicateEntityError || error instanceof ValidationFailedError || error instanceof AmbiguousEntityError) {
+        throw error;
+      }
+      throw new ValidationFailedError('Relationship write failed', { cause: error instanceof Error ? error.message : String(error) });
     }
-
-    const relationship: RelationshipRecord = {
-      id: createId('relationship'),
-      from_entity: from,
-      to_entity: to,
-      relationship_type: relationshipType,
-      metadata: {},
-      created_at: new Date().toISOString()
-    };
-
-    this.relationships.push(relationship);
-    await this.persist();
-    return relationship;
   }
 
   async unlink(from: string, to: string, relationshipType: string): Promise<void> {
     await this.ensureReady();
 
-    const index = this.relationships.findIndex((relationship) => relationship.from_entity === from && relationship.to_entity === to && relationship.relationship_type === relationshipType);
-    if (index < 0) {
-      throw new RelationshipNotFoundError('Relationship not found', { from, to, relationshipType });
-    }
+    this.validationService.validateRelationshipTargets(from, to, relationshipType);
 
-    this.relationships.splice(index, 1);
-    await this.persist();
+    try {
+      this.relationshipService.remove(from, to, relationshipType);
+      this.eventService.append(from, 'relationship_removed', { relationshipType, to });
+      await this.persist();
+    } catch (error) {
+      if (error instanceof RelationshipNotFoundError) {
+        throw error;
+      }
+      throw new ValidationFailedError('Relationship removal failed', { cause: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   async describe(): Promise<{ entities: EntityRecord[]; events: EventRecord[]; relationships: RelationshipRecord[] }> {
     await this.ensureReady();
+    return { entities: this.entities, events: this.events, relationships: this.relationships };
+  }
+
+  async rebuildProjectionsFromEvents(): Promise<{ entities: EntityRecord[]; events: EventRecord[]; relationships: RelationshipRecord[] }> {
+    await this.ensureReady();
+
+    const replayEvents = [...this.events];
+    this.entities.splice(0, this.entities.length);
+    this.relationships.splice(0, this.relationships.length);
+    this.events.splice(0, this.events.length, ...replayEvents);
+
+    for (const event of replayEvents) {
+      if (event.event_type === 'entity_created') {
+        const payload = event.payload as { intent?: StructuredIntent };
+        if (payload.intent) {
+          const entity = this.entityService.createFromIntent({
+            ...payload.intent,
+            entity: {
+              type: payload.intent.entity?.type ?? 'Task',
+              name: payload.intent.entity?.name,
+              id: event.entity_id
+            }
+          });
+          entity.id = event.entity_id;
+        }
+        continue;
+      }
+
+      if (event.event_type === 'relationship_created') {
+        const payload = event.payload as { relationshipType?: string; to?: string };
+        if (payload.relationshipType && payload.to) {
+          const from = event.entity_id;
+          const to = payload.to;
+          try {
+            this.relationshipService.create(from, to, payload.relationshipType);
+          } catch {
+            // Ignore invalid replay entries and continue rebuilding the projection.
+          }
+        }
+        continue;
+      }
+
+      if (event.event_type === 'relationship_removed') {
+        const payload = event.payload as { relationshipType?: string; to?: string };
+        if (payload.relationshipType && payload.to) {
+          try {
+            this.relationshipService.remove(event.entity_id, payload.to, payload.relationshipType);
+          } catch {
+            // Ignore missing relationships during replay.
+          }
+        }
+      }
+    }
+
+    await this.persist();
     return { entities: this.entities, events: this.events, relationships: this.relationships };
   }
 
@@ -160,10 +204,5 @@ export class KnowledgeEngine {
       events: this.events,
       relationships: this.relationships
     });
-  }
-
-  private buildSummary(intent: StructuredIntent): string {
-    const entityName = intent.entity?.name ?? 'New entity';
-    return `${intent.action.toUpperCase()} ${intent.entity?.type ?? 'Entity'} ${entityName}`;
   }
 }
